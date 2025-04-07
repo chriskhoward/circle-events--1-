@@ -1,0 +1,97 @@
+/**
+ * Circle.so Events Admin Styles
+ */
+
+ .circle-events-settings-wrap {
+    margin-top: 20px;
+}
+
+.circle-events-success {
+    background: #f0f8e6;
+    border-left: 4px solid #46b450;
+    padding: 8px 12px;
+    margin: 15px 0;
+}
+
+.circle-events-error {
+    background: #f8d7da;
+    border-left: 4px solid #b32d2e;
+    padding: 8px 12px;
+    margin: 15px 0;
+}
+
+.circle-events-test-result {
+    margin-bottom: 20px;
+    font-weight: 500;
+}
+
+/* Settings page sections */
+.circle-events-tools-section {
+    padding: 15px;
+    background: #f9f9f9;
+    border: 1px solid #e5e5e5;
+    border-radius: 3px;
+    margin-bottom: 20px;
+}
+
+.circle-events-tools-section h3 {
+    margin-top: 0;
+}
+
+.circle-events-tools-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 15px;
+    margin-top: 15px;
+}
+
+.circle-events-tool-card {
+    background: #fff;
+    border: 1px solid #ddd;
+    padding: 15px;
+    border-radius: 3px;
+}
+
+.circle-events-tool-card h4 {
+    margin-top: 0;
+    border-bottom: 1px solid #eee;
+    padding-bottom: 8px;
+}
+
+.circle-events-tool-card p:last-child {
+    margin-bottom: 0;
+}
+
+/* Input fields */
+.form-table .circle-events-api-group {
+    display: flex;
+    align-items: center;
+}
+
+.form-table .circle-events-api-group input {
+    flex: 1;
+}
+
+.form-table .circle-events-api-group .button {
+    margin-left: 10px;
+}
+
+/* Display options */
+.circle-events-display-options {
+    margin-top: 10px;
+}
+
+.circle-events-display-options label {
+    display: block;
+    margin-bottom: 8px;
+}
+
+/* Shortcode examples */
+.circle-events-shortcode-example {
+    display: inline-block;
+    padding: 10px;
+    background: #f0f0f1;
+    border-radius: 3px;
+    font-family: monospace;
+    margin: 5px 0;
+}
