@@ -113,18 +113,21 @@
             
             // Request the widget template via admin-ajax.php
             $.ajax({
-                url: ajaxurl,
+                url: circle_events_params.ajaxurl,
                 method: 'POST',
                 data: {
                     action: 'circle_events_get_widget_template',
                     events: events,
-                    options: options
+                    options: options,
+                    nonce: circle_events_params.ajax_nonce
                 },
                 success: function(response) {
                     if (response.success) {
                         container.html(response.data);
                     } else {
-                        container.html('<div class="circle-events-error">Error refreshing events.</div>');
+                        container.html('<div class="circle-events-error">' + 
+                            (response.data && response.data.message ? response.data.message : 'Error refreshing events.') + 
+                            '</div>');
                     }
                 },
                 error: function() {
@@ -148,18 +151,21 @@
             
             // Request the list template via admin-ajax.php
             $.ajax({
-                url: ajaxurl,
+                url: circle_events_params.ajaxurl,
                 method: 'POST',
                 data: {
                     action: 'circle_events_get_list_template',
                     events: events,
-                    options: options
+                    options: options,
+                    nonce: circle_events_params.ajax_nonce
                 },
                 success: function(response) {
                     if (response.success) {
                         container.html(response.data);
                     } else {
-                        container.html('<div class="circle-events-error">Error refreshing events.</div>');
+                        container.html('<div class="circle-events-error">' + 
+                            (response.data && response.data.message ? response.data.message : 'Error refreshing events.') + 
+                            '</div>');
                     }
                 },
                 error: function() {
@@ -183,18 +189,21 @@
             
             // Request the calendar template via admin-ajax.php
             $.ajax({
-                url: ajaxurl,
+                url: circle_events_params.ajaxurl,
                 method: 'POST',
                 data: {
                     action: 'circle_events_get_calendar_template',
                     events: events,
-                    options: options
+                    options: options,
+                    nonce: circle_events_params.ajax_nonce
                 },
                 success: function(response) {
                     if (response.success) {
                         container.html(response.data);
                     } else {
-                        container.html('<div class="circle-events-error">Error refreshing events.</div>');
+                        container.html('<div class="circle-events-error">' + 
+                            (response.data && response.data.message ? response.data.message : 'Error refreshing events.') + 
+                            '</div>');
                     }
                 },
                 error: function() {

@@ -4,7 +4,7 @@ Tags: circle, events, community, circle.so
 Requires at least: 5.6
 Tested up to: 6.4
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 1.0.1
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -82,10 +82,20 @@ Yes, you can customize the appearance by adding custom CSS to your theme. The pl
 
 == Changelog ==
 
+= 1.0.1 =
+* Fixed API base URL to use correct endpoint
+* Added CST timezone conversion for event times
+* Improved error handling for API requests
+
 = 1.0.0 =
 * Initial release
 
 == Upgrade Notice ==
+
+= 1.0.1 =
+* API endpoint URL has been updated to fix connection issues
+* Event times are now displayed in CST timezone
+* Improved error handling for better debugging
 
 = 1.0.0 =
 Initial release of Circle.so Events Integration.

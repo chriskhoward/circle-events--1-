@@ -19,11 +19,11 @@ if (!defined('WPINC')) {
  */
 class Circle_Events_API {
     /**
-     * API base URL for the Circle.so Admin API V2
+     * API base URL for the Circle.so API
      * 
      * @var string
      */
-    private string $api_base_url = 'https://app.circle.so/api/admin/v2/';
+    private string $api_base_url = 'https://app.circle.so/api/v1';
 
     /**
      * API token
@@ -40,14 +40,135 @@ class Circle_Events_API {
     private string $community_id;
 
     /**
+     * Debug mode flag
+     * 
+     * @var bool
+     */
+    private bool $debug_mode;
+
+    /**
+     * Rate limiter instance
+     * 
+     * @var Circle_Events_Rate_Limiter
+     */
+    private Circle_Events_Rate_Limiter $rate_limiter;
+
+    /**
+     * Error handler instance
+     * 
+     * @var Circle_Events_Error_Handler
+     */
+    private Circle_Events_Error_Handler $error_handler;
+
+    /**
      * Constructor
      * 
      * @param string $api_token    The API token.
      * @param string $community_id The community ID.
+     * @param Circle_Events_Rate_Limiter|null $rate_limiter Optional rate limiter instance
+     * @param Circle_Events_Error_Handler|null $error_handler Optional error handler instance
      */
-    public function __construct(string $api_token, string $community_id) {
+    public function __construct(
+        string $api_token, 
+        string $community_id, 
+        Circle_Events_Rate_Limiter $rate_limiter = null,
+        Circle_Events_Error_Handler $error_handler = null
+    ) {
         $this->api_token = $api_token;
         $this->community_id = $community_id;
+        $this->debug_mode = defined('WP_DEBUG') && WP_DEBUG;
+        $this->rate_limiter = $rate_limiter ?? new Circle_Events_Rate_Limiter();
+        $this->error_handler = $error_handler ?? new Circle_Events_Error_Handler();
+    }
+
+    /**
+     * Log a debug message if debug mode is enabled
+     * 
+     * @param string $message The message to log.
+     * @param mixed  $context Optional context data.
+     */
+    private function log_debug(string $message, $context = null): void {
+        if (!$this->debug_mode) {
+            return;
+        }
+
+        $log_message = '[Circle Events] ' . $message;
+        if ($context !== null) {
+            $log_message .= "\nContext: " . print_r($context, true);
+        }
+
+        error_log($log_message);
+    }
+
+    /**
+     * Validate API configuration
+     * 
+     * @return WP_Error|true True if valid, WP_Error otherwise.
+     */
+    private function validate_config() {
+        if (empty($this->api_token)) {
+            $this->log_debug('API token is empty');
+            return new WP_Error(
+                'invalid_config',
+                __('API token is not configured. Please check your settings.', 'circle-events')
+            );
+        }
+
+        if (empty($this->community_id)) {
+            $this->log_debug('Community ID is empty');
+            return new WP_Error(
+                'invalid_config',
+                __('Community ID is not configured. Please check your settings.', 'circle-events')
+            );
+        }
+
+        return true;
+    }
+
+    /**
+     * Build the full API URL
+     * 
+     * @param string $endpoint The API endpoint.
+     * @return string The full API URL.
+     */
+    private function build_url(string $endpoint): string {
+        // Remove any leading/trailing slashes and ensure proper path construction
+        $endpoint = trim($endpoint, '/');
+        $base_url = rtrim($this->api_base_url, '/');
+        
+        // For community-specific endpoints, prepend the community ID
+        if (!str_starts_with($endpoint, 'me') && !str_starts_with($endpoint, 'communities/')) {
+            $endpoint = "communities/{$this->community_id}/{$endpoint}";
+        }
+        
+        return "{$base_url}/{$endpoint}";
+    }
+
+    /**
+     * Prepare request arguments
+     * 
+     * @param array  $params The request parameters.
+     * @param string $method The HTTP method.
+     * @return array The prepared request arguments.
+     */
+    private function prepare_request_args(array $params, string $method): array {
+        $args = [
+            'timeout' => 30,
+            'headers' => [
+                'Authorization' => 'Token ' . trim($this->api_token),
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+            ],
+        ];
+
+        if ($method !== 'GET') {
+            $args['method'] = $method;
+            if (!empty($params)) {
+                $args['body'] = wp_json_encode($params);
+            }
+        }
+
+        return $args;
     }
 
     /**
@@ -60,83 +181,115 @@ class Circle_Events_API {
      * @return array|WP_Error The response or error.
      */
     private function make_request(string $endpoint, array $params = [], string $method = 'GET') {
-        // Define the API URL
-        $url = $this->api_base_url . $endpoint;
-
-        // Set up the request args
-        $args = [
-            'timeout' => 30,
-            'headers' => [
-                'Authorization' => 'Bearer ' . $this->api_token,
-                'Content-Type' => 'application/json',
-            ],
-        ];
-
-        // Add method-specific handling
-        if ('GET' === $method) {
-            if (!empty($params)) {
-                $url = add_query_arg($params, $url);
-            }
-        } else {
-            $args['method'] = $method;
-            if (!empty($params)) {
-                $args['body'] = wp_json_encode($params);
-            }
+        // Validate configuration
+        $config_validation = $this->validate_config();
+        if (is_wp_error($config_validation)) {
+            $this->error_handler->log_api_error('config_validation', $config_validation);
+            return $config_validation;
         }
 
-        // Log API request for debugging
-        if (defined('WP_DEBUG') && WP_DEBUG) {
-            error_log(sprintf(
-                'Circle Events API Request: %s %s',
-                $method,
-                $url
-            ));
+        // Check rate limits
+        if (!$this->rate_limiter->check_rate_limit($endpoint)) {
+            $error = new WP_Error(
+                'rate_limit_exceeded',
+                __('Rate limit exceeded. Please try again later.', 'circle-events'),
+                ['status' => 429]
+            );
+            $this->error_handler->log_api_error($endpoint, $error, [
+                'method' => $method,
+                'params' => $params
+            ]);
+            return $error;
         }
+
+        // Build URL and args
+        $url = $this->build_url($endpoint);
+        $args = $this->prepare_request_args($params, $method);
+
+        // Add query parameters for GET requests
+        if ($method === 'GET' && !empty($params)) {
+            $url = add_query_arg($params, $url);
+        }
+
+        // Log request details
+        $this->log_debug('API Request', [
+            'URL' => $url,
+            'Method' => $method,
+            'Headers' => $args['headers'],
+            'Params' => $params,
+            'API Token Length' => strlen($this->api_token),
+            'API Token First/Last 4' => substr($this->api_token, 0, 4) . '...' . substr($this->api_token, -4),
+        ]);
 
         // Make the request
         $response = wp_remote_request($url, $args);
 
-        // Check for WP_Error
+        // Handle WP_Error response
         if (is_wp_error($response)) {
-            if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log(sprintf(
-                    'Circle Events API Error: %s',
-                    $response->get_error_message()
-                ));
-            }
+            $this->log_debug('API Request Error', $response->get_error_message());
+            $this->error_handler->log_api_error($endpoint, $response, [
+                'method' => $method,
+                'url' => $url
+            ]);
             return $response;
         }
 
-        // Get response code
+        // Get response details
         $response_code = wp_remote_retrieve_response_code($response);
         $response_body = wp_remote_retrieve_body($response);
-        
-        // Debug the raw API response
-        if (defined('WP_DEBUG') && WP_DEBUG) {
-            error_log('Circle API Raw Response: ' . print_r($response_body, true));
-        }
-        
+        $response_headers = wp_remote_retrieve_headers($response);
+
+        // Log response details
+        $this->log_debug('API Response', [
+            'Status Code' => $response_code,
+            'Headers' => $response_headers,
+            'Body' => $response_body,
+        ]);
+
+        // Parse JSON response
         $response_data = json_decode($response_body, true);
 
-        // Check for successful response
+        // Handle non-200 responses
         if ($response_code < 200 || $response_code >= 300) {
             $error_message = isset($response_data['error']) 
                 ? $response_data['error'] 
                 : sprintf(__('API request failed with status code: %d', 'circle-events'), $response_code);
+
+            $this->log_debug('API Error Response', [
+                'Status' => $response_code,
+                'Message' => $error_message,
+                'URL' => $url,
+            ]);
+
+            $error = new WP_Error('api_error', $error_message, ['status' => $response_code]);
+            $this->error_handler->log_api_error($endpoint, $error, [
+                'response_code' => $response_code,
+                'response_body' => $response_body,
+                'url' => $url,
+                'method' => $method
+            ]);
             
-            if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log(sprintf(
-                    'Circle Events API Error: %s (Status: %d)',
-                    $error_message,
-                    $response_code
-                ));
-            }
-            
-            return new WP_Error(
-                'api_error',
-                $error_message,
-                ['status' => $response_code]
+            return $error;
+        }
+
+        // Handle invalid JSON
+        if (empty($response_data) && !empty($response_body)) {
+            $this->log_debug('Invalid JSON Response', $response_body);
+            $error = new WP_Error(
+                'invalid_response',
+                __('Invalid response format from API', 'circle-events')
             );
+            $this->error_handler->log_api_error($endpoint, $error, [
+                'response_body' => $response_body
+            ]);
+            
+            return $error;
+        }
+
+        // Add rate limit status to response data
+        $rate_limit_status = $this->rate_limiter->get_rate_limit_status($endpoint);
+        if (is_array($response_data)) {
+            $response_data['rate_limit'] = $rate_limit_status;
         }
 
         return $response_data;
@@ -149,8 +302,8 @@ class Circle_Events_API {
      */
     public function test_connection(): array {
         try {
-            // Try to get community info as a simple connection test
-            $response = $this->make_request('community');
+            // Try to get user info
+            $response = $this->make_request('me');
 
             if (is_wp_error($response)) {
                 return [
@@ -159,11 +312,28 @@ class Circle_Events_API {
                 ];
             }
 
+            // Check for valid user data
+            if (empty($response) || !isset($response['id'])) {
+                return [
+                    'success' => false,
+                    'message' => __('Invalid response from Circle.so API. Please check your API token.', 'circle-events'),
+                ];
+            }
+
+            // Verify admin access
+            if (!isset($response['admin']) || !$response['admin']) {
+                return [
+                    'success' => false,
+                    'message' => __('API token does not have admin access. Please use an admin API token.', 'circle-events'),
+                ];
+            }
+
             return [
                 'success' => true,
-                'message' => __('Connection successful', 'circle-events'),
+                'message' => __('Connection successful. API token has admin access.', 'circle-events'),
             ];
         } catch (Exception $e) {
+            $this->log_debug('Test Connection Exception', $e->getMessage());
             return [
                 'success' => false,
                 'message' => $e->getMessage(),
@@ -172,13 +342,47 @@ class Circle_Events_API {
     }
 
     /**
-     * Format event data to standardized structure
+     * Get events from Circle.so
      * 
-     * @param array $event The raw event data from API.
+     * @param int   $limit   The maximum number of events to retrieve.
+     * @param array $filters Optional filters for events.
+     * 
+     * @return array|WP_Error The events or error.
+     */
+    public function get_events(int $limit = 10, array $filters = []): array|WP_Error {
+        try {
+            // Get community events
+            $params = [
+                'per_page' => $limit,
+                'status' => !empty($filters['status']) ? $filters['status'] : 'upcoming',
+            ];
+
+            if (!empty($filters['category'])) {
+                $params['category'] = $filters['category'];
+            }
+
+            $response = $this->make_request('events', $params);
+
+            if (is_wp_error($response)) {
+                return $response;
+            }
+
+            $events = isset($response['records']) ? $response['records'] : [];
+            return $this->format_events($events);
+
+        } catch (Exception $e) {
+            $this->log_debug('Get Events Exception', $e->getMessage());
+            return new WP_Error('events_exception', $e->getMessage());
+        }
+    }
+
+    /**
+     * Format event data
+     * 
+     * @param array $event The raw event data.
      * @return array The formatted event data.
      */
     private function format_event(array $event): array {
-        // Default values
         $formatted = [
             'id' => '',
             'title' => '',
@@ -190,102 +394,59 @@ class Circle_Events_API {
             'is_online' => false,
             'thumbnail_url' => '',
             'status' => '',
-            'raw_data' => $event, // Store original data for debugging
+            'raw_data' => $event,
         ];
-        
-        // Log the event data for debugging
-        if (defined('WP_DEBUG') && WP_DEBUG) {
-            error_log('Formatting event: ' . print_r($event, true));
-        }
-        
-        // Map the API fields to our standardized format
+
+        $this->log_debug('Formatting Event', $event);
+
+        // Map fields
         if (isset($event['id'])) {
             $formatted['id'] = sanitize_text_field($event['id']);
         }
-        
+
         if (isset($event['name'])) {
             $formatted['title'] = sanitize_text_field($event['name']);
-        } elseif (isset($event['title'])) {
-            $formatted['title'] = sanitize_text_field($event['title']);
         }
-        
-        // Handle description - in V2 API it might be in body.body
+
         if (isset($event['description'])) {
             $formatted['description'] = wp_kses_post($event['description']);
-        } elseif (isset($event['body']) && is_array($event['body']) && isset($event['body']['body'])) {
-            $formatted['description'] = wp_kses_post($event['body']['body']);
-        } elseif (isset($event['body']) && !is_array($event['body'])) {
-            $formatted['description'] = wp_kses_post($event['body']);
         }
-        
-        // Handle dates and times
+
         if (isset($event['starts_at'])) {
             $formatted['start_time'] = sanitize_text_field($event['starts_at']);
-        } elseif (isset($event['start_time'])) {
-            $formatted['start_time'] = sanitize_text_field($event['start_time']);
-        } elseif (isset($event['published_at'])) {
-            // Fallback to published_at if no start time is available
-            $formatted['start_time'] = sanitize_text_field($event['published_at']);
         }
-        
+
         if (isset($event['ends_at'])) {
             $formatted['end_time'] = sanitize_text_field($event['ends_at']);
-        } elseif (isset($event['end_time'])) {
-            $formatted['end_time'] = sanitize_text_field($event['end_time']);
         }
-        
-        // Handle location
+
         if (isset($event['location'])) {
             $formatted['location'] = sanitize_text_field($event['location']);
-        } elseif (isset($event['space_name'])) {
-            // Use space name as location if no specific location is provided
-            $formatted['location'] = sanitize_text_field($event['space_name']);
         }
-        
-        // Handle URL
+
         if (isset($event['url'])) {
             $formatted['url'] = esc_url_raw($event['url']);
-        } elseif (isset($event['permalink'])) {
-            $formatted['url'] = esc_url_raw($event['permalink']);
         }
-        
-        // Handle online status
+
         if (isset($event['is_online'])) {
             $formatted['is_online'] = (bool) $event['is_online'];
-        } elseif (isset($event['location_type']) && $event['location_type'] === 'virtual') {
-            $formatted['is_online'] = true;
         }
-        
-        // Handle thumbnail
+
         if (isset($event['thumbnail_url'])) {
             $formatted['thumbnail_url'] = esc_url_raw($event['thumbnail_url']);
-        } elseif (isset($event['image_url'])) {
-            $formatted['thumbnail_url'] = esc_url_raw($event['image_url']);
-        } elseif (isset($event['cover_image_url'])) {
-            $formatted['thumbnail_url'] = esc_url_raw($event['cover_image_url']);
-        } elseif (isset($event['cover_url'])) {
-            $formatted['thumbnail_url'] = esc_url_raw($event['cover_url']);
-        } elseif (isset($event['image']) && is_array($event['image']) && isset($event['image']['url'])) {
-            $formatted['thumbnail_url'] = esc_url_raw($event['image']['url']);
-        } elseif (isset($event['cover_image']) && is_array($event['cover_image']) && isset($event['cover_image']['url'])) {
-            $formatted['thumbnail_url'] = esc_url_raw($event['cover_image']['url']);
-        } elseif (isset($event['space_image_url'])) {
-            // Fallback to space image if event has no image
-            $formatted['thumbnail_url'] = esc_url_raw($event['space_image_url']);
         }
-        
-        // Handle status
+
         if (isset($event['status'])) {
             $formatted['status'] = sanitize_text_field($event['status']);
         }
-        
+
         return $formatted;
     }
 
     /**
      * Format multiple events
      * 
-     * @param array $events The raw events data from API.
+     * @param array $events The raw events data.
      * @return array The formatted events data.
      */
     private function format_events(array $events): array {
@@ -293,240 +454,15 @@ class Circle_Events_API {
         foreach ($events as $event) {
             $formatted_events[] = $this->format_event($event);
         }
-        
-        // Sort events by start time
+
+        // Sort by start time
         usort($formatted_events, function($a, $b) {
             if (empty($a['start_time']) || empty($b['start_time'])) {
                 return 0;
             }
             return strtotime($a['start_time']) - strtotime($b['start_time']);
         });
-        
-        return $formatted_events;
-    }
 
-    /**
-     * Get events from Circle.so
-     * 
-     * @param int $limit The maximum number of events to retrieve.
-     * @param array $filters Optional filters for events (category, date range, etc.)
-     * 
-     * @return array|WP_Error The events or error.
-     */
-    public function get_events(int $limit = 10, array $filters = []): array|WP_Error {
-        try {
-            $all_events = [];
-            $event_ids = []; // Track event IDs to prevent duplicates
-            
-            // First try the space events endpoint
-            $space_events = $this->get_space_events($limit, $filters);
-            if (!is_wp_error($space_events)) {
-                foreach ($space_events as $event) {
-                    if (!empty($event['id']) && !in_array($event['id'], $event_ids)) {
-                        $all_events[] = $event;
-                        $event_ids[] = $event['id'];
-                    }
-                }
-            }
-            
-            // Then try community events endpoint
-            $community_events = $this->get_community_events($limit, $filters);
-            if (!is_wp_error($community_events)) {
-                foreach ($community_events as $event) {
-                    if (!empty($event['id']) && !in_array($event['id'], $event_ids)) {
-                        $all_events[] = $event;
-                        $event_ids[] = $event['id'];
-                    }
-                }
-            }
-            
-            // Finally try the direct events endpoint
-            $direct_events = $this->get_direct_events($limit, $filters);
-            if (!is_wp_error($direct_events)) {
-                foreach ($direct_events as $event) {
-                    if (!empty($event['id']) && !in_array($event['id'], $event_ids)) {
-                        $all_events[] = $event;
-                        $event_ids[] = $event['id'];
-                    }
-                }
-            }
-            
-            // Sort all events by start time
-            usort($all_events, function($a, $b) {
-                if (empty($a['start_time']) || empty($b['start_time'])) {
-                    return 0;
-                }
-                return strtotime($a['start_time']) - strtotime($b['start_time']);
-            });
-            
-            // Apply limit if needed
-            if ($limit > 0 && count($all_events) > $limit) {
-                $all_events = array_slice($all_events, 0, $limit);
-            }
-            
-            return $all_events;
-        } catch (Exception $e) {
-            if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log(sprintf(
-                    'Circle Events Exception: %s',
-                    $e->getMessage()
-                ));
-            }
-            
-            return new WP_Error(
-                'events_exception',
-                $e->getMessage()
-            );
-        }
-    }
-    
-    /**
-     * Get events from Circle.so space events endpoint
-     * 
-     * @param int $limit The maximum number of events to retrieve.
-     * @param array $filters Optional filters for events (category, date range, etc.)
-     * 
-     * @return array|WP_Error The events or error.
-     */
-    private function get_space_events(int $limit = 10, array $filters = []) {
-        // First try to get spaces in the community
-        $spaces_response = $this->make_request('spaces');
-        
-        if (is_wp_error($spaces_response)) {
-            return $spaces_response;
-        }
-        
-        $spaces = isset($spaces_response['records']) ? $spaces_response['records'] : [];
-        
-        if (empty($spaces)) {
-            if (defined('WP_DEBUG') && WP_DEBUG) {
-                error_log('No spaces found in community');
-            }
-            return [];
-        }
-        
-        // Filter spaces by category if specified
-        if (!empty($filters['category'])) {
-            $category = strtolower($filters['category']);
-            $spaces = array_filter($spaces, function($space) use ($category) {
-                return isset($space['name']) && 
-                       (stripos(strtolower($space['name']), $category) !== false || 
-                        (isset($space['slug']) && stripos(strtolower($space['slug']), $category) !== false));
-            });
-        }
-        
-        // Collect events from all spaces
-        $all_events = [];
-        
-        foreach ($spaces as $space) {
-            if (!isset($space['id'])) {
-                continue;
-            }
-            
-            $space_id = $space['id'];
-            
-            $params = [
-                'per_page' => $limit * 2, // Request more to account for filtering
-                'status' => !empty($filters['status']) ? $filters['status'] : 'upcoming',
-            ];
-            
-            $response = $this->make_request('events', $params);
-            
-            if (is_wp_error($response)) {
-                continue; // Skip this space and try the next one
-            }
-            
-            $events = isset($response['records']) ? $response['records'] : [];
-            
-            foreach ($events as $event) {
-                // Add space information to the event
-                if (isset($space['name'])) {
-                    $event['space_name'] = $space['name'];
-                }
-                if (isset($space['id'])) {
-                    $event['space_id'] = $space['id'];
-                }
-                if (isset($space['image_url'])) {
-                    $event['space_image_url'] = $space['image_url'];
-                }
-                
-                $all_events[] = $this->format_event($event);
-            }
-        }
-        
-        // Sort events by start time
-        usort($all_events, function($a, $b) {
-            if (empty($a['start_time']) || empty($b['start_time'])) {
-                return 0;
-            }
-            return strtotime($a['start_time']) - strtotime($b['start_time']);
-        });
-        
-        // Limit results if needed
-        if ($limit > 0 && count($all_events) > $limit) {
-            $all_events = array_slice($all_events, 0, $limit);
-        }
-        
-        return $all_events;
-    }
-    
-    /**
-     * Get events from Circle.so community events endpoint
-     * 
-     * @param int $limit The maximum number of events to retrieve.
-     * @param array $filters Optional filters for events (category, date range, etc.)
-     * 
-     * @return array|WP_Error The events or error.
-     */
-    private function get_community_events(int $limit = 10, array $filters = []) {
-        $params = [
-            'per_page' => $limit * 2, // Request more to account for filtering
-            'status' => !empty($filters['status']) ? $filters['status'] : 'upcoming',
-        ];
-        
-        // Add category filter if specified
-        if (!empty($filters['category'])) {
-            $params['category'] = $filters['category'];
-        }
-        
-        $response = $this->make_request('events', $params);
-        
-        if (is_wp_error($response)) {
-            return $response;
-        }
-        
-        $events = isset($response['records']) ? $response['records'] : [];
-        
-        return $this->format_events($events);
-    }
-    
-    /**
-     * Get events from Circle.so direct events endpoint
-     * 
-     * @param int $limit The maximum number of events to retrieve.
-     * @param array $filters Optional filters for events (category, date range, etc.)
-     * 
-     * @return array|WP_Error The events or error.
-     */
-    private function get_direct_events(int $limit = 10, array $filters = []) {
-        $params = [
-            'per_page' => $limit * 2, // Request more to account for filtering
-            'status' => !empty($filters['status']) ? $filters['status'] : 'upcoming',
-        ];
-        
-        // Add category filter if specified
-        if (!empty($filters['category'])) {
-            $params['category'] = $filters['category'];
-        }
-        
-        $response = $this->make_request('events', $params);
-        
-        if (is_wp_error($response)) {
-            return $response;
-        }
-        
-        $events = isset($response['records']) ? $response['records'] : [];
-        
-        return $this->format_events($events);
+        return $formatted_events;
     }
 }
